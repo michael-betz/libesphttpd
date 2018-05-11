@@ -9,6 +9,7 @@ Broken out because esp-idf is expected to get better routines for this.
 
 #include <libesphttpd/esp.h>
 #ifdef ESP32
+#include "esp_log.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,86 +19,41 @@ Broken out because esp-idf is expected to get better routines for this.
 #include "rom/crc.h"
 #include "rom/rtc.h"
 #include "esp_partition.h"
+#include "esp_ota_ops.h"
 
-/*   Size of 32 bytes is friendly to flash encryption */
-typedef struct {
-    uint32_t ota_seq;
-    uint8_t  seq_label[24];
-    uint32_t crc; /* CRC32 of ota_seq field only */
-} ota_select;
+static const char *TAG = "esp32_flash.c";
 
-
-static uint32_t ota_select_crc(const ota_select *s)
-{
-  return crc32_le(UINT32_MAX, (uint8_t*)&s->ota_seq, 4);
-}
-
-static bool ota_select_valid(const ota_select *s)
-{
-  return s->ota_seq != UINT32_MAX && s->crc == ota_select_crc(s);
-}
-
-//ToDo: Allow more OTA partitions than the current 2
-static int getOtaSel() {
-	int selectedPart;
-	ota_select sa1, sa2;
-	const esp_partition_t* otaselpart=esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
-	spi_flash_read((uint32)otaselpart->address, (uint32_t*)&sa1, sizeof(ota_select));
-	spi_flash_read((uint32)otaselpart->address+0x1000, (uint32_t*)&sa2, sizeof(ota_select));
-	if (ota_select_valid(&sa1) && ota_select_valid(&sa2)) {
-		selectedPart=(((sa1.ota_seq > sa2.ota_seq)?sa1.ota_seq:sa2.ota_seq))%2;
-	} else if (ota_select_valid(&sa1)) {
-		selectedPart=(sa1.ota_seq)%2;
-	} else if (ota_select_valid(&sa2)) {
-		selectedPart=(sa2.ota_seq)%2;
-	} else {
-		printf("esp32 ota: no valid ota select sector found!\n");
-		selectedPart=-1;
-	}
-	printf("OTA part select ID: %d\n", selectedPart);
-	return selectedPart;
-}
-
-
+const esp_partition_t *update_partition = NULL;
 int esp32flashGetUpdateMem(uint32_t *loc, uint32_t *size) {
-	const esp_partition_t* otaselpart;
-	int selectedPart=getOtaSel();
-	if (selectedPart==-1) return 0;
-	otaselpart=esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0+selectedPart, NULL);
-	*loc=otaselpart->address;
-	*size=otaselpart->size;
-	return 1;
+	const esp_partition_t *configured = esp_ota_get_boot_partition();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    
+    if (configured != running) {
+        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08x, but running from offset 0x%08x", configured->address, running->address);
+        ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
+    }
+    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08x)", running->type, running->subtype, running->address);
+	update_partition = esp_ota_get_next_update_partition(NULL);
+    if( update_partition ){
+    	ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%x", update_partition->subtype, update_partition->address );
+	    *loc  = update_partition->address;
+	    *size = update_partition->size;
+	    return 1;
+    }
+    return 0;
 }
-
 
 int esp32flashSetOtaAsCurrentImage() {
-	const esp_partition_t* otaselpart=esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
-	int selSect=-1;
-	ota_select sa1,sa2, newsa;
-	spi_flash_read((uint32)otaselpart->address, (uint32_t*)&sa1, sizeof(ota_select));
-	spi_flash_read((uint32)otaselpart->address+0x1000, (uint32_t*)&sa2, sizeof(ota_select));
-	if (ota_select_valid(&sa1) && ota_select_valid(&sa2)) {
-		selSect=(sa1.ota_seq > sa2.ota_seq)?1:0;
-	} else if (ota_select_valid(&sa1)) {
-		selSect=1;
-	} else if (ota_select_valid(&sa2)) {
-		selSect=0;
-	} else {
-		printf("esp32 ota: no valid ota select sector found!\n");
+	if( update_partition==NULL ){
+		ESP_LOGE(TAG, "no partition to set the boot flag. update it first");
+		return 0;
 	}
-	if (selSect==0) {
-		newsa.ota_seq=sa2.ota_seq+1;
-		printf("Writing seq %d to ota select sector 1\n", newsa.ota_seq);
-		newsa.crc = ota_select_crc(&newsa);
-		spi_flash_erase_sector(otaselpart->address/0x1000);
-		spi_flash_write(otaselpart->address,(uint32_t *)&newsa,sizeof(ota_select));
-	} else {
-		printf("Writing seq %d to ota select sector 2\n", newsa.ota_seq);
-		newsa.ota_seq=sa1.ota_seq+1;
-		newsa.crc = ota_select_crc(&newsa);
-		spi_flash_erase_sector(otaselpart->address/0x1000+1);
-		spi_flash_write(otaselpart->address+0x1000,(uint32_t *)&newsa,sizeof(ota_select));
+	int err = esp_ota_set_boot_partition(update_partition);
+	if (err != ESP_OK) {
+	    ESP_LOGE(TAG, "esp_ota_set_boot_partition failed! err=0x%x", err);
+	    return 0;
 	}
+	ESP_LOGI(TAG, "esp_ota_set_boot_partition succeeded (%d) !!!!!", err);
 	return 1;
 }
 

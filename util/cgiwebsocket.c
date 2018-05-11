@@ -103,7 +103,7 @@ static int ICACHE_FLASH_ATTR sendFrameHead(Websock *ws, int opcode, int len) {
 	} else {
 		buf[i++]=len;
 	}
-	httpd_printf("WS: Sent frame head for payload of %d bytes.\n", len);
+	// httpd_printf("WS: Sent frame head for payload of %d bytes.\n", len);
 	return httpdSend(ws->conn, buf, i);
 }
 
